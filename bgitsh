@@ -1,0 +1,246 @@
+#!/usr/bin/python
+#
+# bgitsh - restrict access to git repos under a single ssh account
+#
+# -h for usage.
+#
+# Copyright (c) 2010 Brian "Beej Jorgensen" Hall <beej@beej.us>
+#
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files (the
+# "Software"), to deal in the Software without restriction, including
+# without limitation the rights to use, copy, modify, merge, publish,
+# distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so, subject to
+# the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+# IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+# CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+# TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+import sys
+import os
+import os.path
+import getopt
+import re
+
+accessfilename = os.path.expanduser('~/.ssh/bgitsh_access')
+SCRIPTNAME="bgitsh"
+
+#--------------------------------------------------------------------
+class AppContext(object):
+
+	def __init__(self, argv):
+
+		def _extract_repo_name(com):
+			plist = com[4:].split()  # 4 to skip "git-" or "git "
+			for i in plist[1:]:  # 1 to skip upload-pack or receive-pack
+				if i[0] == '-': continue  # skip command line options
+				return i
+			return None
+
+		global SCRIPTNAME
+
+		SCRIPTNAME = os.path.basename(argv.pop(0))
+
+		if 'SSH_ORIGINAL_COMMAND' in os.environ:
+			self.ssh_command = os.environ['SSH_ORIGINAL_COMMAND']
+
+			self.git_mode = None
+
+			if re.match(r'git[ -]upload-pack', self.ssh_command):
+				self.git_mode = 'r';   # pull
+			elif re.match(r'git[ -]receive-pack', self.ssh_command):
+				self.git_mode = 'w';   # push
+
+			if self.git_mode != None:
+				self.git_command = self.ssh_command
+				self.git_repo = _extract_repo_name(self.git_command)
+			else:
+				self.git_command = None  # no valid git command
+				self.git_repo = None
+
+			# escape the command line
+			# !!! TODO: this needs to be made Right
+			if self.git_command != None:
+				self.git_command = \
+					re.sub(r'([\$;])', r'\\\1', self.git_command)
+		else:
+			self.ssh_command = None
+			self.git_command = None
+			self.git_mode = None
+			self.git_repo = None
+		
+		self.user = None
+		self.test = False
+
+		doUsage = False
+
+		try:
+			opts, args = getopt.gnu_getopt(argv, "ht", \
+				["help", "test"])
+
+			if len(args) > 1:
+				doUsage = True
+
+			for o, a in opts:
+				if o in ('-h', '--help'):
+					doUsage = True
+				if o in ('-t', '--test'):
+					self.test = True
+
+			for a in args:
+				if self.user == None:
+					self.user = a
+		except:
+			doUsage = True
+
+		if doUsage: usage_exit()
+
+#--------------------------------------------------------------------
+def warn(s):
+	sys.stderr.write("%s: %s\n" % (SCRIPTNAME, s))
+
+#--------------------------------------------------------------------
+def error_exit(s, status=1):
+	sys.stderr.write("%s: %s\n" % (SCRIPTNAME, s))
+	sys.exit(status)
+
+#--------------------------------------------------------------------
+def usage_exit(status=1):
+	sys.stderr.write("""usage: %s [options] [user]
+
+       -h --help      this help
+       -t --test      test run only (parse config and exit)
+""" % SCRIPTNAME)
+	sys.exit(status)
+
+#--------------------------------------------------------------------
+def read_userperms(userperms):
+	"""Parse the userperms file"""
+
+	success = True
+
+	linenum = 0
+
+	fp = open(accessfilename, "r")
+
+	for l in fp:
+		linenum += 1
+
+		l = l.strip()
+		if l == '' or l[0] == '#' or l[0:1] == '//': continue
+
+		permlist = l.split()
+		username = permlist.pop(0)
+
+		if username not in userperms:
+			userperms[username] = []
+		
+		for perm in permlist:
+			try:
+				(repo,p) = perm.split(',')
+				repo = os.path.abspath(os.path.expanduser(repo))
+				if repo[0] != '^': repo = '^' + repo  # force whole-word match
+				if repo[-1] != '$': repo = repo + '$'  # force whole-word match
+
+				userperms[username].append([repo,p])
+			except:
+				warn('%s line %s: error parsing repo,perm' % \
+					(accessfilename, linenum))
+				success = False
+
+	fp.close()
+
+	return success
+
+#--------------------------------------------------------------------
+def test_userperms(username, repo, requestedperm, userperms):
+	"""
+	Test to see if a user has permissions to access a repo.
+
+	username: the user in question
+	repo: the requested repo
+	requestedperm: the requested access permission
+	userperms: the complete userperm data
+
+	Returns True if the user has permission
+	"""
+
+	def _perm_ok(req, have):
+		if req == 'r': return 'r' in have
+		if req == 'w': return 'w' in have
+
+		return False
+
+	if username not in userperms:
+		return False  # never heard of you
+
+	# normalize repo name to remove outside quotes, if it has it:
+	if repo[0] == "'" and repo[-1] == "'": repo = repo[1:-1]
+	repo = os.path.abspath(os.path.expanduser(repo))
+
+	for r,p in userperms[username]:
+		if re.match(r, repo) != None:  # found a match on the repo
+			if _perm_ok(requestedperm, p):
+				return True
+
+			return False
+
+	return False
+
+#--------------------------------------------------------------------
+def dump_userperms(username, userperms):
+	def _d_up(u):
+		sys.stdout.write("%s:" % u)
+		for r,p in userperms[u]:
+			sys.stdout.write(" %s,%s" % (r,p))
+
+		sys.stdout.write('\n')
+
+	if username == None:
+		for n in userperms: _d_up(n)
+	else:
+		_d_up(username)
+
+#--------------------------------------------------------------------
+def main(argv):
+	userperms = {}
+
+	if not read_userperms(userperms):
+		error_exit("error reading user permissions")
+
+	ac = AppContext(argv)
+
+	if ac.test:
+		dump_userperms(ac.user, userperms)
+		return 0
+
+	if ac.ssh_command == None:
+		error_exit("no interactive shell for you!")
+
+	if ac.git_command == None:
+		error_exit("only git commands git-upload-pack and git-receive-pack supported")
+
+	if ac.git_repo == None:
+		error_exit("missing repo name")
+
+	access_granted = test_userperms(ac.user, ac.git_repo, ac.git_mode, userperms)
+	if access_granted:
+		os.system(ac.git_command)
+	else:
+		error_exit("access denied")
+
+	return 0
+
+
+#--------------------------------------------------------------------
+if __name__ == "__main__": sys.exit(main(sys.argv))
+

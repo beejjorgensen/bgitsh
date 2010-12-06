@@ -1,0 +1,33 @@
+# bgitsh access file
+#
+# Format:
+# 
+# username reponame,perms [reponame,perms ...]
+#
+# Repo names can be regular expressions.
+#
+# Permissions are:
+#
+#   r   pull access
+#   w   push access
+#   rw  pull and push access
+#   z   no access
+#
+# Repo names are tested in left to right order until the first match is
+# made.  If no rules match, no access permission is granted.
+#
+# Examples:
+#
+# Allow read on repo1, read/write on repo2:
+#
+#   joeuser repo1,r repo2,rw
+#
+# Allow read on all repos, except the secret repo:
+#
+#   joeuser secret_repo,z .*,r
+#
+# Allow full access to all repos named "clientX_something", and nothing else:
+#
+#   joeuser clientX_.*,rw
+#
+
